@@ -266,8 +266,12 @@ class easypandas:
             return df.loc[start:end, cols]
         
         # Case 3: Single string → selection by row index or column range
-        if len(args) == 1 and isinstance(args[0], str):
-            arg = args[0]
+        # --- REEMPLAZA DESDE AQUÍ ---
+        operators = ['==', '!=', '>', '<', '>=', '<=']
+        
+        if len(args) == 1 and isinstance(args[0], str) and any(op in args[0] for op in operators):
+            return self.where(*args)
+        # --- HASTA AQUÍ ---
             
             # If it's a column range (e.g., "A:D")
             if ":" in arg:
@@ -1019,31 +1023,51 @@ class easypandas:
         >>> P.set("Factor", "Factor * 1.5", "Sex == 'M'")
         """
         # 1. Column existence validation (Case-insensitive mapping)
-        column=self.gfield(column)
+        column = self.gfield(column)
         col_map = {c.lower(): c for c in self.df.columns}
         target_col = col_map.get(column.lower(), column) 
-    
+        
+        affected_rows = 0 # Inicializamos el contador
+
         if condition:
             # Get boolean mask for the condition
             mask = self.df.eval(condition)
+            affected_rows = mask.sum() # Contamos cuántos True hay en la máscara
             
-            # Check if value is a math expression
-            if isinstance(value, str) and any(op in value for op in "+-*/"):
-                # Update only filtered rows using eval
-                self.df.loc[mask, target_col] = self.df.eval(value)
-            else:
-                # Set fixed value for filtered rows
-                self.df.loc[mask, target_col] = value
+            if affected_rows > 0:
+                # Check if value is a math expression
+                if isinstance(value, str) and any(op in value for op in "+-*/"):
+                    self.df.loc[mask, target_col] = self.df.eval(value)
+                else:
+                    self.df.loc[mask, target_col] = value
         else:
             # Global operation on the entire column
+            affected_rows = len(self.df) # Si no hay condición, se afecta toda la columna
             if isinstance(value, str) and any(op in value for op in "+-*/"):
                 self.df[target_col] = self.df.eval(value)
             else:
                 self.df[target_col] = value
                 
-        print(f"✅ Processed '{target_col}' successfully.")
+        # Mensaje mucho más informativo para tu Capítulo 5
+        print(f"✅ Column '{target_col}' updated. Rows affected: {affected_rows}")
      
+    def fillnan(self, field, value, *args):
+        # Si hay argumentos en *args, el primero es nuestra condición
+        # Pero le sumamos automáticamente la detección de NaNs
+        
+        if args:
+            # Combinamos la condición del usuario con la detección de nulos
+            # Usamos 'and' para que solo actúe donde se cumplan AMBAS
+            user_condition = args[0]
+            full_condition = f"({user_condition}) and ( {field} != {field} )"
+        else:
+            # Si no hay args, solo buscamos nulos en esa columna
+            full_condition = f"{field} != {field}"
+        
+        # Reutilizamos tu función set que ya cuenta filas
+        return self.set(field, value, full_condition)
 
+        
     def multiset(self, column, labels, conditions, default="Other"):
         """
         Applies multiple conditions to a single column in one go.
@@ -1114,7 +1138,7 @@ class easypandas:
     def join(self, other, left=None, right=None, on=None, how="inner"):
         
         # Get underlying DataFrame
-        other_df = getattr(other, "pdobj", other)
+        other_df = getattr(other, "df", other)
     
         if on is not None:
             df = self.df.merge(other_df, on=on, how=how)
@@ -1131,7 +1155,7 @@ class easypandas:
         --------
         A.append(B)
         """
-        other_df = getattr(other, "pdobj", other)
+        other_df = getattr(other, "df", other)
         
         df = pd.concat([self.df, other_df], ignore_index=True)
         
@@ -1176,10 +1200,11 @@ class easypandas:
     
         return sexpr
  
-    def datagrid(self, col_filters, row_filters, col_names=None, row_names=None):
+    def datagrid(self, col_filters, row_filters, col_names=None, row_names=None, title="Survival Analysis %"):
         import pandas as pd
+        import matplotlib.pyplot as plt
         
-        # 1. Etiquetas limpias
+        # 1. Etiquetas y Matrix (Tu lógica impecable)
         c_names = col_names if col_names else col_filters
         r_names = row_names if row_names else row_filters
         
@@ -1188,23 +1213,42 @@ class easypandas:
             row_data = []
             for c_f in col_filters:
                 combined = f"({r_f}) and ({c_f})"
-                # Usamos len() para evitar el error de 'int' object is not callable
-                filtered_res = self.where(combined)
-                count = len(filtered_res.pdobj) 
+                count = len(self.where(combined).df) 
                 row_data.append(count)
             matrix.append(row_data)
         
-        # 2. Creamos el DataFrame
         df_grid = pd.DataFrame(matrix, index=r_names, columns=c_names)
         
-        # 3. Agregamos los Totales con nombres limpios
-        # Total por fila (derecha)
-        df_grid['Total'] = df_grid.sum(axis=1)
+        # 2. Porcentajes para el gráfico
+        df_perc = df_grid.div(df_grid.sum(axis=1), axis=0) * 100
+    
+        # --- GRÁFICO COMPACTO (MITAD DE ALTURA) ---
+        # Cambiamos figsize a (10, 3) para que sea bajito y ancho
+        ax = df_perc.plot(kind='barh', stacked=True, figsize=(10, 3), color=['#2ecc71', '#e74c3c'])
         
-        # Total por columna (abajo)
-        df_grid.loc['Total'] = df_grid.sum(axis=0)
+        plt.title(title, fontsize=12, fontweight='bold', pad=15)
+        plt.xlabel("Percentage (%)")
+        plt.xlim(0, 100)
         
-        return easypandas(df_grid)
+        # Etiquetas de % dentro de las barras
+        for p in ax.patches:
+            width = p.get_width()
+            if width > 1:
+                ax.text(p.get_x() + width/2, p.get_y() + p.get_height()/2, 
+                        f'{int(width)}%', va='center', ha='center', 
+                        color='white', fontweight='bold', fontsize=10)
+        
+        # Ajustamos la leyenda para que no estorbe
+        plt.legend(title="Status", loc='center left', bbox_to_anchor=(1, 0.5))
+        plt.tight_layout()
+        plt.show()
+    
+        # 3. La Tabla de salida (Totales)
+        df_final = df_grid.copy()
+        df_final['Total'] = df_final.sum(axis=1)
+        df_final.loc['Total'] = df_final.sum(axis=0)
+        
+        return easypandas(df_final)
 
     def getnulls(self, columna=None):
         """
@@ -1224,7 +1268,7 @@ class easypandas:
         condicion = self._limpiar_condicion(condicion)
         # 1. Aplicar el cambio principal
         
-        idx_cumple = self.where(condicion).pdobj.index
+        idx_cumple = self.where(condicion).df.index
         self.df.loc[idx_cumple, columna] = nuevo_valor
         
         # 2. Si hay argumentos extra, detectamos qué son
@@ -1512,9 +1556,20 @@ class easypandas:
         # Llamamos a la función de la otra librería pasando nuestro df interno
         return familystat(self.df, column) 
         
-    def superedit(self):
+    def superedit(self, *args):
         import dtale
-        return (dtale.show(self.df))
+        
+        # 1. Si no hay argumentos, mostramos todo como antes
+        if not args:
+            return dtale.show(self.df)
+        
+        # 2. Si hay argumentos, usamos la lógica de tu función 'where'
+        # para obtener solo la "rebanada" de datos que nos interesa
+        filtered_data = self.where(*args)
+        
+        # 3. Lanzamos dtale pero solo con el DataFrame filtrado (.df)
+        print(f"Opening SuperEdit for: {args}")
+        return dtale.show(filtered_data.df)
  
  
     def generalplot(self):
